@@ -1,24 +1,22 @@
 import { useState, useEffect } from "react"
-import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import DataTable, { type Column, type TableFilter } from "@/components/ui/data-table"
 import { useAuth } from "@/context/auth-context"
 import { supabase } from "@/lib/supabase"
 import type { Machine, UserProfile } from "@/types"
-import { Plus, Search, Loader2, Wrench } from "lucide-react"
+import { Plus, Loader2, Wrench } from "lucide-react"
 
 export default function MachinesPage() {
   const { profile } = useAuth()
   const [machines, setMachines] = useState<Machine[]>([])
   const [customers, setCustomers] = useState<UserProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState("")
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState({
@@ -35,9 +33,7 @@ export default function MachinesPage() {
 
   useEffect(() => {
     fetchMachines()
-    if (isAdmin) {
-      fetchCustomers()
-    }
+    if (isAdmin) fetchCustomers()
   }, [profile])
 
   async function fetchMachines() {
@@ -93,11 +89,51 @@ export default function MachinesPage() {
     }
   }
 
-  const filtered = machines.filter((m) =>
-    m.name.toLowerCase().includes(search.toLowerCase()) ||
-    m.serial_number.toLowerCase().includes(search.toLowerCase()) ||
-    m.model_number.toLowerCase().includes(search.toLowerCase())
-  )
+  // ─── DataTable columns ──────────────────────────────────────
+  const statusBadge: Record<string, "success" | "warning" | "destructive" | "secondary"> = {
+    active: "success",
+    under_service: "warning",
+    retired: "destructive",
+    inactive: "secondary",
+  }
+
+  const columns: Column<Machine>[] = [
+    { key: "serial_number", header: "Serial #", className: "w-32" },
+    { key: "model_number", header: "Model #", className: "w-32" },
+    { key: "name", header: "Name" },
+    ...(isAdmin
+      ? [{ key: "owner_name" as const, header: "Owner", render: (m: Machine) => <span className="text-sm">{m.owner_name || "-"}</span> }]
+      : []),
+    {
+      key: "status",
+      header: "Status",
+      render: (m: Machine) => (
+        <Badge variant={statusBadge[m.status] || "secondary"} className="capitalize">
+          {m.status.replace("_", " ")}
+        </Badge>
+      ),
+    },
+    {
+      key: "purchase_date",
+      header: "Purchase Date",
+      render: (m: Machine) => (
+        <span className="text-sm text-muted-foreground">{m.purchase_date ? new Date(m.purchase_date).toLocaleDateString() : "-"}</span>
+      ),
+    },
+  ]
+
+  const filters: TableFilter[] = [
+    {
+      key: "status",
+      label: "Status",
+      options: [
+        { value: "active", label: "Active" },
+        { value: "inactive", label: "Inactive" },
+        { value: "under_service", label: "Under Service" },
+        { value: "retired", label: "Retired" },
+      ],
+    },
+  ]
 
   return (
     <div className="space-y-6">
@@ -184,72 +220,18 @@ export default function MachinesPage() {
         )}
       </div>
 
-      {/* Search & Filter */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          placeholder="Search by name, serial, or model number..."
-          className="pl-9"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
-
-      {/* Machines Table */}
-      <Card>
-        <CardContent className="p-0">
-          {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="text-center py-12">
-              <Wrench className="h-12 w-12 mx-auto text-muted-foreground/50" />
-              <p className="mt-4 text-sm text-muted-foreground">No machines found</p>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12 text-muted-foreground">#</TableHead>
-                  <TableHead>Serial #</TableHead>
-                  <TableHead>Model #</TableHead>
-                  <TableHead>Name</TableHead>
-                  {isAdmin && <TableHead>Owner</TableHead>}
-                  <TableHead>Status</TableHead>
-                  <TableHead>Purchase Date</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((machine, idx) => (
-                  <TableRow key={machine.id}>
-                    <TableCell className="text-muted-foreground text-xs tabular-nums">{idx + 1}</TableCell>
-                    <TableCell className="font-mono text-xs">{machine.serial_number}</TableCell>
-                    <TableCell className="font-mono text-xs">{machine.model_number}</TableCell>
-                    <TableCell className="font-medium">{machine.name}</TableCell>
-                    {isAdmin && <TableCell>{machine.owner_name}</TableCell>}
-                    <TableCell>
-                      <Badge
-                        variant={
-                          machine.status === "active" ? "success" :
-                          machine.status === "under_service" ? "warning" :
-                          machine.status === "retired" ? "destructive" : "secondary"
-                        }
-                        className="capitalize"
-                      >
-                        {machine.status.replace("_", " ")}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {machine.purchase_date ? new Date(machine.purchase_date).toLocaleDateString() : "-"}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      <DataTable<Machine>
+        data={machines}
+        columns={columns}
+        loading={loading}
+        searchPlaceholder="Search by name, serial, or model number..."
+        emptyMessage="No machines found"
+        emptyIcon={Wrench}
+        rowKey={(m) => m.id}
+        filters={filters}
+        exportable={isAdmin}
+        exportFilename="machines"
+      />
     </div>
   )
 }

@@ -1,23 +1,21 @@
 import { useState, useEffect } from "react"
-import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import DataTable, { type Column, type TableFilter } from "@/components/ui/data-table"
 import { useAuth } from "@/context/auth-context"
 import { supabase } from "@/lib/supabase"
 import type { Part, Machine } from "@/types"
-import { Plus, Search, Loader2, Package } from "lucide-react"
+import { Plus, Loader2, Package } from "lucide-react"
 
 export default function PartsPage() {
   const { profile } = useAuth()
   const [parts, setParts] = useState<Part[]>([])
   const [machines, setMachines] = useState<Machine[]>([])
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState("")
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState({
@@ -38,9 +36,7 @@ export default function PartsPage() {
 
   async function fetchParts() {
     try {
-      let query = supabase.from("parts").select("*").order("created_at", { ascending: false })
       if (isCustomer) {
-        // Get parts for customer's machines
         const { data: machineIds } = await supabase
           .from("machines")
           .select("id")
@@ -55,7 +51,10 @@ export default function PartsPage() {
         }
         return
       }
-      const { data } = await query
+      const { data } = await supabase
+        .from("parts")
+        .select("*")
+        .order("created_at", { ascending: false })
       if (data) setParts(data)
     } catch (err) {
       console.error("Error fetching parts:", err)
@@ -92,10 +91,39 @@ export default function PartsPage() {
     }
   }
 
-  const filtered = parts.filter((p) =>
-    p.name.toLowerCase().includes(search.toLowerCase()) ||
-    p.part_number.toLowerCase().includes(search.toLowerCase())
-  )
+  // ─── DataTable columns ──────────────────────────────────────
+  const stockBadge: Record<string, "success" | "warning" | "destructive"> = {
+    in_stock: "success",
+    low_stock: "warning",
+    out_of_stock: "destructive",
+  }
+
+  const columns: Column<Part>[] = [
+    { key: "part_number", header: "Part #", className: "w-36" },
+    { key: "name", header: "Name" },
+    { key: "compatible_models", header: "Compatible Models", render: (p: Part) => <span className="text-sm text-muted-foreground">{p.compatible_models || "-"}</span> },
+    {
+      key: "stock_status",
+      header: "Stock Status",
+      render: (p: Part) => (
+        <Badge variant={stockBadge[p.stock_status] || "secondary"} className="capitalize">
+          {p.stock_status.replace("_", " ")}
+        </Badge>
+      ),
+    },
+  ]
+
+  const filters: TableFilter[] = [
+    {
+      key: "stock_status",
+      label: "Stock Status",
+      options: [
+        { value: "in_stock", label: "In Stock" },
+        { value: "low_stock", label: "Low Stock" },
+        { value: "out_of_stock", label: "Out of Stock" },
+      ],
+    },
+  ]
 
   return (
     <div className="space-y-6">
@@ -172,60 +200,18 @@ export default function PartsPage() {
         )}
       </div>
 
-      {/* Search */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input placeholder="Search parts..." className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} />
-      </div>
-
-      {/* Parts Table */}
-      <Card>
-        <CardContent className="p-0">
-          {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="text-center py-12">
-              <Package className="h-12 w-12 mx-auto text-muted-foreground/50" />
-              <p className="mt-4 text-sm text-muted-foreground">No parts found</p>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12 text-muted-foreground">#</TableHead>
-                  <TableHead>Part #</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Compatible Models</TableHead>
-                  <TableHead>Stock Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((part, idx) => (
-                  <TableRow key={part.id}>
-                    <TableCell className="text-muted-foreground text-xs tabular-nums">{idx + 1}</TableCell>
-                    <TableCell className="font-mono text-xs">{part.part_number}</TableCell>
-                    <TableCell className="font-medium">{part.name}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{part.compatible_models || "-"}</TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={
-                          part.stock_status === "in_stock" ? "success" :
-                          part.stock_status === "low_stock" ? "warning" : "destructive"
-                        }
-                        className="capitalize"
-                      >
-                        {part.stock_status.replace("_", " ")}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      <DataTable<Part>
+        data={parts}
+        columns={columns}
+        loading={loading}
+        searchPlaceholder="Search by part number or name..."
+        emptyMessage="No parts found"
+        emptyIcon={Package}
+        rowKey={(p) => p.id}
+        filters={filters}
+        exportable={isAdmin}
+        exportFilename="parts"
+      />
     </div>
   )
 }

@@ -1,17 +1,15 @@
 import { useState, useEffect } from "react"
-import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import DataTable, { type Column } from "@/components/ui/data-table"
 import { useAuth } from "@/context/auth-context"
 import { supabase } from "@/lib/supabase"
 import type { ServiceReport } from "@/types"
-import { Search, Loader2, FileText, Eye } from "lucide-react"
+import { FileText, Eye } from "lucide-react"
 
 export default function ServiceReportsPage() {
   const { profile } = useAuth()
   const [reports, setReports] = useState<ServiceReport[]>([])
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState("")
 
   useEffect(() => {
     fetchReports()
@@ -25,7 +23,6 @@ export default function ServiceReportsPage() {
         .order("created_at", { ascending: false })
 
       if (profile?.role === "customer") {
-        // Get customer's machines
         const { data: machines } = await supabase
           .from("machines")
           .select("id")
@@ -58,11 +55,52 @@ export default function ServiceReportsPage() {
     }
   }
 
-  const filtered = reports.filter((r) =>
-    r.service_details?.toLowerCase().includes(search.toLowerCase()) ||
-    r.machine_name?.toLowerCase().includes(search.toLowerCase()) ||
-    r.machine_model?.toLowerCase().includes(search.toLowerCase())
-  )
+  const isAdmin = profile?.role === "super_admin" || profile?.role === "admin"
+
+  const columns: Column<ServiceReport>[] = [
+    {
+      key: "machine_name",
+      header: "Machine",
+      render: (r) => <span className="font-medium">{r.machine_name} <span className="text-muted-foreground font-normal">({r.machine_model})</span></span>,
+    },
+    {
+      key: "engineer_name",
+      header: "Engineer",
+      render: (r) => <span className="text-sm">{r.engineer_name || "N/A"}</span>,
+    },
+    {
+      key: "service_details",
+      header: "Service Details",
+      render: (r) => <p className="text-sm text-muted-foreground line-clamp-2 max-w-[300px]">{r.service_details}</p>,
+    },
+    {
+      key: "next_service_date",
+      header: "Next Service",
+      render: (r) => <span className="text-sm text-muted-foreground">{r.next_service_date ? new Date(r.next_service_date).toLocaleDateString() : "-"}</span>,
+    },
+    {
+      key: "created_at",
+      header: "Date",
+      render: (r) => <span className="text-sm text-muted-foreground">{new Date(r.created_at).toLocaleDateString()}</span>,
+    },
+    {
+      key: "pdf_url",
+      header: "Report",
+      sortable: false,
+      render: (r) => (
+        r.pdf_url ? (
+          <Button size="sm" variant="outline" asChild>
+            <a href={r.pdf_url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+              <Eye className="h-3 w-3 mr-1" />
+              View PDF
+            </a>
+          </Button>
+        ) : (
+          <span className="text-xs text-muted-foreground">No PDF</span>
+        )
+      ),
+    },
+  ]
 
   return (
     <div className="space-y-6">
@@ -71,62 +109,17 @@ export default function ServiceReportsPage() {
         <p className="text-muted-foreground text-sm mt-1">View all completed service reports</p>
       </div>
 
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input placeholder="Search reports..." className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} />
-      </div>
-
-      <Card>
-        <CardContent className="p-0">
-          {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="text-center py-12">
-              <FileText className="h-12 w-12 mx-auto text-muted-foreground/50" />
-              <p className="mt-4 text-sm text-muted-foreground">No service reports found</p>
-            </div>
-          ) : (
-            <div className="divide-y">
-              {filtered.map((report) => (
-                <div key={report.id} className="p-4 md:p-6 hover:bg-muted/30 transition-colors">
-                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <FileText className="h-4 w-4 text-primary" />
-                        <p className="font-medium">
-                          {report.machine_name} ({report.machine_model})
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
-                        <span>Engineer: {report.engineer_name || "N/A"}</span>
-                        <span>Service: {new Date(report.created_at).toLocaleDateString()}</span>
-                        {report.next_service_date && (
-                          <span>Next: {new Date(report.next_service_date).toLocaleDateString()}</span>
-                        )}
-                      </div>
-                      <p className="text-sm mt-2 text-muted-foreground line-clamp-2">
-                        {report.remarks || report.service_details?.slice(0, 150)}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {report.pdf_url && (
-                        <Button size="sm" variant="outline" asChild>
-                          <a href={report.pdf_url} target="_blank" rel="noopener noreferrer">
-                            <Eye className="h-3 w-3 mr-1" />
-                            View PDF
-                          </a>
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <DataTable<ServiceReport>
+        data={reports}
+        columns={columns}
+        loading={loading}
+        searchPlaceholder="Search by machine, model, or details..."
+        emptyMessage="No service reports found"
+        emptyIcon={FileText}
+        rowKey={(r) => r.id}
+        exportable={isAdmin}
+        exportFilename="service-reports"
+      />
     </div>
   )
 }

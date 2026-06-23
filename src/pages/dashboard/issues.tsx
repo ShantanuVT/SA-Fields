@@ -1,17 +1,17 @@
 import { useState, useEffect } from "react"
-import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import DataTable, { type Column, type TableFilter } from "@/components/ui/data-table"
 import { useAuth } from "@/context/auth-context"
 import { supabase } from "@/lib/supabase"
 import type { Issue, Machine, UserProfile } from "@/types"
-import { Plus, Search, Loader2, CheckCircle2, UserCheck, MessageSquare } from "lucide-react"
+import FileUpload, { type UploadedFile } from "@/components/ui/file-upload"
+import { Plus, Loader2, UserCheck, CheckCircle2, MessageSquare, FileText } from "lucide-react"
 
 export default function IssuesPage() {
   const { profile } = useAuth()
@@ -19,16 +19,28 @@ export default function IssuesPage() {
   const [machines, setMachines] = useState<Machine[]>([])
   const [engineers, setEngineers] = useState<UserProfile[]>([])
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState("")
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [assignOpen, setAssignOpen] = useState(false)
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
   const [assignForm, setAssignForm] = useState({ engineer_id: "", tentative_days: 3 })
+  const [reportOpen, setReportOpen] = useState(false)
+  const [reportSaving, setReportSaving] = useState(false)
+  const [issueForReport, setIssueForReport] = useState<Issue | null>(null)
+  const [reportForm, setReportForm] = useState({
+    service_details: "",
+    parts_replaced: "",
+    next_service_date: "",
+    actual_resolution_date: new Date().toISOString().split("T")[0],
+    remarks: "",
+  })
 
   const isAdmin = profile?.role === "super_admin" || profile?.role === "admin"
   const isCustomer = profile?.role === "customer"
   const isEngineer = profile?.role === "engineer"
+
+  const [mediaFiles, setMediaFiles] = useState<UploadedFile[]>([])
+  const [reportPdf, setReportPdf] = useState<UploadedFile[]>([])
 
   const [form, setForm] = useState({
     machine_id: "",
@@ -105,19 +117,37 @@ export default function IssuesPage() {
     e.preventDefault()
     setSaving(true)
     try {
-      const { error } = await supabase.from("issues").insert({
+      // 1. Create the issue
+      const { data: issueData, error } = await supabase.from("issues").insert({
         customer_id: profile!.user_id,
         machine_id: form.machine_id,
         description: form.description,
         urgency: form.urgency,
         status: "submitted",
-      })
-      if (!error) {
-        setOpen(false)
-        setForm({ machine_id: "", description: "", urgency: "medium" })
-        fetchIssues()
+      }).select("id").single()
+
+      if (error) throw new Error(error.message)
+
+      // 2. Upload media files and insert issue_media records
+      if (mediaFiles.length > 0 && issueData) {
+        const mediaRecords = mediaFiles.map((f) => ({
+          issue_id: issueData.id,
+          file_url: f.url,
+          file_type: f.type.startsWith("video/") ? "video" as const : "image" as const,
+        }))
+
+        const { error: mediaError } = await supabase
+          .from("issue_media")
+          .insert(mediaRecords)
+
+        if (mediaError) console.error("Error saving media records:", mediaError)
       }
-    } catch (err) {
+
+      setOpen(false)
+      setForm({ machine_id: "", description: "", urgency: "medium" })
+      setMediaFiles([])
+      fetchIssues()
+    } catch (err: any) {
       console.error("Error submitting issue:", err)
     } finally {
       setSaving(false)
@@ -139,7 +169,6 @@ export default function IssuesPage() {
         .eq("id", selectedIssue.id)
 
       if (!error) {
-        // Create engineer assignment record
         await supabase.from("engineer_assignments").insert({
           engineer_id: assignForm.engineer_id,
           customer_id: selectedIssue.customer_id,
@@ -149,7 +178,6 @@ export default function IssuesPage() {
           status: "approved",
         })
 
-        // Create notification for engineer
         await supabase.from("notifications").insert({
           user_id: assignForm.engineer_id,
           type: "engineer_assigned",
@@ -169,39 +197,215 @@ export default function IssuesPage() {
     }
   }
 
-  async function handleResolve(issueId: string) {
-    await supabase
-      .from("issues")
-      .update({ status: "resolved" })
-      .eq("id", issueId)
-    fetchIssues()
-  }
+  async function handleSubmitReport(e: React.FormEvent) {
+    e.preventDefault()
+    if (!issueForReport) return
+    setReportSaving(true)
+    try {
+      // 1. Insert service report (with PDF URL if uploaded)
+      const pdfUrl = reportPdf.length > 0 ? reportPdf[0].url : ""
+      const { error: reportError } = await supabase.from("service_reports").insert({
+        issue_id: issueForReport.id,
+        machine_id: issueForReport.machine_id,
+        engineer_id: profile!.user_id,
+        service_details: reportForm.service_details,
+        parts_replaced: reportForm.parts_replaced,
+        next_service_date: reportForm.next_service_date || null,
+        actual_resolution_date: reportForm.actual_resolution_date,
+        remarks: reportForm.remarks,
+        pdf_url: pdfUrl,
+      })
 
-  const getStatusBadge = (status: string) => {
-    const variants: Record<string, "default" | "success" | "warning" | "info" | "destructive" | "secondary"> = {
-      submitted: "info",
-      under_review: "warning",
-      assigned: "secondary",
-      resolved: "success",
+      if (reportError) throw new Error(reportError.message)
+
+      // 2. Update issue status to resolved
+      await supabase
+        .from("issues")
+        .update({ status: "resolved" })
+        .eq("id", issueForReport.id)
+
+      // 3. Log machine history
+      await supabase.from("machine_history").insert({
+        machine_id: issueForReport.machine_id,
+        event_type: "service_completed",
+        description: `Service completed: ${reportForm.service_details.slice(0, 150)}`,
+        reference_id: issueForReport.id,
+        created_by: profile?.name || "Engineer",
+      })
+
+      // 4. Update machine status back to active if it was under_service
+      await supabase
+        .from("machines")
+        .update({ status: "active" })
+        .eq("id", issueForReport.machine_id)
+        .eq("status", "under_service")
+
+      // 5. Notify the customer
+      await supabase.from("notifications").insert({
+        user_id: issueForReport.customer_id,
+        type: "service_completed",
+        title: "Issue Resolved",
+        message: `Your issue has been resolved: ${issueForReport.description.slice(0, 100)}`,
+        reference_id: issueForReport.id,
+      })
+
+      // Close dialog and reset
+      setReportOpen(false)
+      setIssueForReport(null)
+      setReportPdf([])
+      setReportForm({
+        service_details: "",
+        parts_replaced: "",
+        next_service_date: "",
+        actual_resolution_date: new Date().toISOString().split("T")[0],
+        remarks: "",
+      })
+      fetchIssues()
+    } catch (err) {
+      console.error("Error submitting service report:", err)
+    } finally {
+      setReportSaving(false)
     }
-    return <Badge variant={variants[status] || "default"} className="capitalize">{status.replace("_", " ")}</Badge>
   }
 
-  const getUrgencyBadge = (urgency: string) => {
-    const variants: Record<string, "default" | "secondary" | "destructive" | "warning" | "info"> = {
-      low: "secondary",
-      medium: "info",
-      high: "warning",
-      critical: "destructive",
-    }
-    return <Badge variant={variants[urgency] || "default"} className="capitalize">{urgency}</Badge>
+  // ─── Badge helpers ──────────────────────────────────────────
+  const statusVariants: Record<string, "default" | "success" | "warning" | "info" | "destructive" | "secondary"> = {
+    submitted: "info",
+    under_review: "warning",
+    assigned: "secondary",
+    resolved: "success",
   }
 
-  const filtered = issues.filter((i) =>
-    i.description.toLowerCase().includes(search.toLowerCase()) ||
-    i.machine_name?.toLowerCase().includes(search.toLowerCase()) ||
-    i.customer_name?.toLowerCase().includes(search.toLowerCase())
-  )
+  const urgencyVariants: Record<string, "default" | "secondary" | "destructive" | "warning" | "info"> = {
+    low: "secondary",
+    medium: "info",
+    high: "warning",
+    critical: "destructive",
+  }
+
+  // ─── DataTable columns ──────────────────────────────────────
+  const columns: Column<Issue>[] = [
+    {
+      key: "description",
+      header: "Description",
+      render: (i) => <p className="truncate max-w-[250px] text-sm font-medium">{i.description}</p>,
+    },
+    {
+      key: "machine_name",
+      header: "Machine",
+      render: (i) => <span className="text-sm">{i.machine_name || "-"}</span>,
+    },
+    ...(isAdmin
+      ? [{ key: "customer_name" as const, header: "Customer", render: (i: Issue) => <span className="text-sm">{i.customer_name || "-"}</span> }]
+      : []),
+    {
+      key: "urgency",
+      header: "Urgency",
+      render: (i) => (
+        <Badge variant={urgencyVariants[i.urgency] || "default"} className="capitalize">
+          {i.urgency}
+        </Badge>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      render: (i) => (
+        <Badge variant={statusVariants[i.status] || "default"} className="capitalize">
+          {i.status.replace("_", " ")}
+        </Badge>
+      ),
+    },
+    {
+      key: "created_at",
+      header: "Reported On",
+      render: (i) => <span className="text-sm text-muted-foreground text-nowrap">{new Date(i.created_at).toLocaleDateString()}</span>,
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      sortable: false,
+      className: "text-right",
+      render: (issue) => (
+        <div className="flex items-center justify-end gap-2">
+          {isAdmin && (issue.status === "submitted" || issue.status === "under_review") && (
+            <>
+              {issue.status === "submitted" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={async (e) => {
+                    e.stopPropagation()
+                    await supabase.from("issues").update({ status: "under_review" }).eq("id", issue.id)
+                    fetchIssues()
+                  }}
+                >
+                  Review
+                </Button>
+              )}
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setSelectedIssue(issue)
+                  setAssignOpen(true)
+                }}
+              >
+                <UserCheck className="h-3 w-3 mr-1" />
+                Assign
+              </Button>
+            </>
+          )}
+          {isEngineer && issue.status === "assigned" && (
+            <Button size="sm" variant="success" onClick={(e) => {
+              e.stopPropagation()
+              setIssueForReport(issue)
+              setReportForm({
+                service_details: "",
+                parts_replaced: "",
+                next_service_date: "",
+                actual_resolution_date: new Date().toISOString().split("T")[0],
+                remarks: "",
+              })
+              setReportOpen(true)
+            }}>
+              <FileText className="h-3 w-3 mr-1" />
+              Complete Service
+            </Button>
+          )}
+          {isCustomer && issue.status === "assigned" && issue.engineer_name && (
+            <span className="text-xs text-muted-foreground">Engineer: {issue.engineer_name}</span>
+          )}
+          {issue.status === "resolved" && (
+            <span className="text-xs text-muted-foreground">Resolved</span>
+          )}
+        </div>
+      ),
+    },
+  ]
+
+  const filters: TableFilter[] = [
+    {
+      key: "status",
+      label: "Status",
+      options: [
+        { value: "submitted", label: "Submitted" },
+        { value: "under_review", label: "Under Review" },
+        { value: "assigned", label: "Assigned" },
+        { value: "resolved", label: "Resolved" },
+      ],
+    },
+    {
+      key: "urgency",
+      label: "Urgency",
+      options: [
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium" },
+        { value: "high", label: "High" },
+        { value: "critical", label: "Critical" },
+      ],
+    },
+  ]
 
   return (
     <div className="space-y-6">
@@ -263,6 +467,20 @@ export default function IssuesPage() {
                       rows={4}
                     />
                   </div>
+
+                  {/* Attachment upload */}
+                  <div className="space-y-2">
+                    <Label>Attachments (optional)</Label>
+                    <FileUpload
+                      bucket="issue-media"
+                      accept="image/*,video/*"
+                      maxSizeMB={10}
+                      maxFiles={5}
+                      files={mediaFiles}
+                      onChange={setMediaFiles}
+                      acceptLabel="Upload images or videos showing the issue"
+                    />
+                  </div>
                 </div>
                 <DialogFooter>
                   <Button type="submit" disabled={saving}>
@@ -275,112 +493,18 @@ export default function IssuesPage() {
         )}
       </div>
 
-      {/* Search */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          placeholder="Search by description, machine, or customer..."
-          className="pl-9"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
-
-      {/* Issues Table */}
-      <Card>
-        <CardContent className="p-0">
-          {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="text-center py-12">
-              <MessageSquare className="h-12 w-12 mx-auto text-muted-foreground/50" />
-              <p className="mt-4 text-sm text-muted-foreground">No issues found</p>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12 text-muted-foreground">#</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead>Machine</TableHead>
-                  {isAdmin && <TableHead>Customer</TableHead>}
-                  <TableHead>Urgency</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-nowrap">Reported On</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((issue, idx) => (
-                  <TableRow key={issue.id}>
-                    <TableCell className="text-muted-foreground text-xs tabular-nums">{idx + 1}</TableCell>
-                    <TableCell className="max-w-[250px]">
-                      <p className="truncate text-sm font-medium">{issue.description}</p>
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm">{issue.machine_name || "-"}</span>
-                    </TableCell>
-                    {isAdmin && (
-                      <TableCell className="text-sm">{issue.customer_name || "-"}</TableCell>
-                    )}
-                    <TableCell>{getUrgencyBadge(issue.urgency)}</TableCell>
-                    <TableCell>{getStatusBadge(issue.status)}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground text-nowrap">
-                      {new Date(issue.created_at).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        {isAdmin && (issue.status === "submitted" || issue.status === "under_review") && (
-                          <>
-                            {issue.status === "submitted" && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={async () => {
-                                  await supabase.from("issues").update({ status: "under_review" }).eq("id", issue.id)
-                                  fetchIssues()
-                                }}
-                              >
-                                Review
-                              </Button>
-                            )}
-                            <Button
-                              size="sm"
-                              onClick={() => {
-                                setSelectedIssue(issue)
-                                setAssignOpen(true)
-                              }}
-                            >
-                              <UserCheck className="h-3 w-3 mr-1" />
-                              Assign
-                            </Button>
-                          </>
-                        )}
-                        {isEngineer && issue.status === "assigned" && (
-                          <Button size="sm" variant="success" onClick={() => handleResolve(issue.id)}>
-                            <CheckCircle2 className="h-3 w-3 mr-1" />
-                            Resolve
-                          </Button>
-                        )}
-                        {isCustomer && issue.status === "assigned" && issue.engineer_name && (
-                          <span className="text-xs text-muted-foreground">
-                            Engineer: {issue.engineer_name}
-                          </span>
-                        )}
-                        {issue.status === "resolved" && (
-                          <span className="text-xs text-muted-foreground">Resolved</span>
-                        )}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      <DataTable<Issue>
+        data={issues}
+        columns={columns}
+        loading={loading}
+        searchPlaceholder="Search by description, machine, or customer..."
+        emptyMessage="No issues found"
+        emptyIcon={MessageSquare}
+        rowKey={(i) => i.id}
+        filters={filters}
+        exportable={isAdmin}
+        exportFilename="issues"
+      />
 
       {/* Assign Engineer Dialog */}
       <Dialog open={assignOpen} onOpenChange={setAssignOpen}>
@@ -425,6 +549,111 @@ export default function IssuesPage() {
             <DialogFooter>
               <Button type="submit" disabled={saving}>
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Assign & Notify"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Service Report Dialog */}
+      <Dialog open={reportOpen} onOpenChange={setReportOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Complete Service</DialogTitle>
+            <DialogDescription>
+              {issueForReport && (
+                <span className="text-muted-foreground">
+                  Issue: <strong>{issueForReport.description.slice(0, 100)}</strong>
+                  {issueForReport.description.length > 100 && "..."}
+                </span>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleSubmitReport}>
+            <div className="grid gap-4 py-4 max-h-[60vh] overflow-y-auto pr-1">
+              <div className="space-y-2">
+                <Label htmlFor="service_details">
+                  Service Details <span className="text-destructive">*</span>
+                </Label>
+                <Textarea
+                  id="service_details"
+                  value={reportForm.service_details}
+                  onChange={(e) => setReportForm({ ...reportForm, service_details: e.target.value })}
+                  placeholder="Describe the service performed, what was found, and what was done..."
+                  required
+                  rows={4}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="parts_replaced">Parts Replaced</Label>
+                <Textarea
+                  id="parts_replaced"
+                  value={reportForm.parts_replaced}
+                  onChange={(e) => setReportForm({ ...reportForm, parts_replaced: e.target.value })}
+                  placeholder="List any parts that were replaced during service..."
+                  rows={2}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="resolution_date">Resolution Date</Label>
+                  <Input
+                    id="resolution_date"
+                    type="date"
+                    value={reportForm.actual_resolution_date}
+                    onChange={(e) => setReportForm({ ...reportForm, actual_resolution_date: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="next_service">Next Service Date</Label>
+                  <Input
+                    id="next_service"
+                    type="date"
+                    value={reportForm.next_service_date}
+                    onChange={(e) => setReportForm({ ...reportForm, next_service_date: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="remarks">Remarks</Label>
+                <Textarea
+                  id="remarks"
+                  value={reportForm.remarks}
+                  onChange={(e) => setReportForm({ ...reportForm, remarks: e.target.value })}
+                  placeholder="Any additional notes or recommendations..."
+                  rows={2}
+                />
+              </div>
+
+              {/* PDF upload */}
+              <div className="space-y-2">
+                <Label>Service Report PDF (optional)</Label>
+                <FileUpload
+                  bucket="service-reports"
+                  accept=".pdf,application/pdf"
+                  maxSizeMB={20}
+                  maxFiles={1}
+                  files={reportPdf}
+                  onChange={setReportPdf}
+                  acceptLabel="Upload the service report as PDF"
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setReportOpen(false)} disabled={reportSaving}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={reportSaving}>
+                {reportSaving ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4 mr-2" />
+                )}
+                {reportSaving ? "Submitting..." : "Complete & Submit Report"}
               </Button>
             </DialogFooter>
           </form>

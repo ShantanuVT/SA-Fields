@@ -4,6 +4,7 @@ import { useAuth } from "@/context/auth-context"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import ConfirmDialog from "@/components/ui/confirm-dialog"
 import {
   Cog,
   LayoutDashboard,
@@ -61,9 +62,18 @@ export default function Sidebar() {
   const location = useLocation()
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [logoutOpen, setLogoutOpen] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
 
   const role = profile?.role || "customer"
   const filteredItems = navItems.filter((item) => item.roles.includes(role))
+
+  async function handleLogout() {
+    setLoggingOut(true)
+    await signOut()
+    setLoggingOut(false)
+    setLogoutOpen(false)
+  }
 
   return (
     <>
@@ -143,7 +153,7 @@ export default function Sidebar() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={signOut}
+                onClick={() => setLogoutOpen(true)}
                 className="text-sidebar-foreground hover:text-destructive hover:bg-destructive/10"
               >
                 <LogOut className="h-4 w-4 mr-2" />
@@ -160,6 +170,18 @@ export default function Sidebar() {
           )}
         </div>
       </aside>
+
+      {/* Logout Confirmation Dialog */}
+      <ConfirmDialog
+        open={logoutOpen}
+        onOpenChange={setLogoutOpen}
+        title="Sign Out"
+        description="Are you sure you want to sign out? You will be redirected to the login page."
+        confirmText={loggingOut ? "Signing out..." : "Sign Out"}
+        variant="destructive"
+        loading={loggingOut}
+        onConfirm={handleLogout}
+      />
     </>
   )
 }
